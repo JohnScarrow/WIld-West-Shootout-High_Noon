@@ -1,0 +1,519 @@
+; =============================================================================
+; HIGH NOON - Wild West Reaction Time Game
+; LC-3 Assembly
+; =============================================================================
+; ADDRESSING RULES:
+;   LD/ST/LEA/BR  9-bit  -> data within +/-255 words of instruction
+;   JSR           11-bit -> target within +/-1023 words
+;   JSRR Rn       16-bit -> anywhere in memory (used for all JSR calls)
+;
+; KB_POLL:
+;   Non-blocking keyboard read implemented as a plain subroutine.
+;   Called via LD R5 / JSRR R5 like all other subroutines.
+;   Returns R0 = char if key ready, R0 = 0 if no key.
+;   No privilege mode or trap vector table required.
+;
+; GAME FLOW:
+;   Title -> [loop] Ready -> RandomDelay -> DRAW! -> ReactionLoop -> Score
+;   ReactionLoop animates the outlaw drawing frame-by-frame.
+;   Press any key before the outlaw fires to survive.
+;   Too slow = dead.
+; =============================================================================
+
+.ORIG x3000
+
+; =============================================================================
+; MAIN
+; =============================================================================
+MAIN
+    LD   R6, STACK_BASE
+
+    LD   R5, ADDR_PTITLE        ; title screen + wait for key
+    JSRR R5
+
+GAME_LOOP
+    LD   R5, ADDR_PREADY
+    JSRR R5
+
+    LD   R5, ADDR_RDELAY        ; random wait before DRAW!
+    JSRR R5
+
+    LD   R5, ADDR_PDRAW         ; flush buffer, print DRAW! banner
+    JSRR R5
+
+    LD   R5, ADDR_RLOOP         ; animated reaction loop (sets PLAYER_ALIVE)
+    JSRR R5
+
+    LD   R5, ADDR_PSCORE        ; print outcome
+    JSRR R5
+
+    LD   R5, ADDR_AGAIN         ; play again? -> R0 = 1 or 0
+    JSRR R5
+    BRp  GAME_LOOP
+
+    LD   R5, ADDR_PBYE
+    JSRR R5
+    HALT
+
+; ---- jump table (all within 255 words of MAIN) ------------------------------
+STACK_BASE    .FILL x3F00
+ADDR_PTITLE   .FILL PRINT_TITLE
+ADDR_PREADY   .FILL PRINT_READY
+ADDR_RDELAY   .FILL RANDOM_DELAY
+ADDR_PDRAW    .FILL PRINT_DRAW
+ADDR_RLOOP    .FILL REACTION_LOOP
+ADDR_PSCORE   .FILL PRINT_SCORE
+ADDR_AGAIN    .FILL ASK_PLAY_AGAIN
+ADDR_PBYE     .FILL PRINT_GOODBYE
+
+; =============================================================================
+; SUBROUTINE: KB_POLL
+;   Non-blocking keyboard read.  Called via LD R5 / JSRR R5.
+;   Returns: R0 = character if a key is ready, R0 = 0 otherwise.
+;   All other registers unchanged.
+; =============================================================================
+KB_POLL
+    LDI  R0, KBP_SR            ; read keyboard status register
+    BRzp KBP_NONE              ; bit 15 clear -> no key ready
+    LDI  R0, KBP_DR            ; bit 15 set  -> read the character
+    RET
+KBP_NONE
+    AND  R0, R0, #0            ; return 0 (no key)
+    RET
+
+KBP_SR .FILL xFE00
+KBP_DR .FILL xFE02
+
+; =============================================================================
+; SUBROUTINE: PRINT_TITLE
+;   Clear screen, ASCII art, wait for any key to begin.
+; =============================================================================
+PRINT_TITLE
+    ST   R7, PT_R7
+    ST   R0, PT_R0
+
+    LEA  R0, STR_CLEAR
+    LD   R5, PT_PSTR
+    JSRR R5
+
+    LEA  R0, STR_TITLE
+    LD   R5, PT_PSTR
+    JSRR R5
+
+PT_WAIT
+    LDI  R0, PT_KBSR
+    BRzp PT_WAIT
+    LDI  R0, PT_KBDR            ; consume the keypress
+
+    LD   R0, PT_R0
+    LD   R7, PT_R7
+    RET
+
+PT_R7   .BLKW 1
+PT_R0   .BLKW 1
+PT_KBSR .FILL xFE00
+PT_KBDR .FILL xFE02
+PT_PSTR .FILL PRINT_STR
+
+STR_CLEAR
+    .STRINGZ "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+
+STR_TITLE
+    .STRINGZ "============================================================\n        H I G H   N O O N\n        A Wild West Reaction Time Game\n============================================================\n\n           |     |\n          [=====]      _\n           |   |      |_|  <-- you\n           *   *\n\n  The sun beats down on the dusty street.\n  Your hand hovers near your iron.\n\n  When you see  >>> DRAW! <<<  press ANY KEY before\n  the outlaw fires.  Too slow and you die.\n\n  Press any key to begin...\n\n"
+
+; =============================================================================
+; SUBROUTINE: PRINT_READY
+;   Suspense screen between rounds.
+; =============================================================================
+PRINT_READY
+    ST   R7, PRY_R7
+    ST   R0, PRY_R0
+
+    LEA  R0, STR_READY
+    LD   R5, PRY_PSTR
+    JSRR R5
+
+    LD   R0, PRY_R0
+    LD   R7, PRY_R7
+    RET
+
+PRY_R7   .BLKW 1
+PRY_R0   .BLKW 1
+PRY_PSTR .FILL PRINT_STR
+
+STR_READY
+    .STRINGZ "\n------------------------------------------------------------\n  *  tumbleweed rolls by...  *\n\n        .    .    .    Keep your hand steady...\n\n"
+
+; =============================================================================
+; SUBROUTINE: PRINT_DRAW
+;   1) Flush keyboard buffer (discard any presses made during the delay)
+;   2) Print DRAW! banner
+;   Flushing here means the reaction loop starts clean.
+; =============================================================================
+PRINT_DRAW
+    ST   R7, PDR_R7
+    ST   R0, PDR_R0
+
+PDR_FLUSH
+    LDI  R0, PDR_KBSR           ; check for buffered keypress
+    BRzp PDR_FLUSH_DONE
+    LDI  R0, PDR_KBDR           ; discard it
+    BR   PDR_FLUSH
+PDR_FLUSH_DONE
+
+    LEA  R0, STR_DRAW
+    LD   R5, PDR_PSTR
+    JSRR R5
+
+    LD   R0, PDR_R0
+    LD   R7, PDR_R7
+    RET
+
+PDR_R7   .BLKW 1
+PDR_R0   .BLKW 1
+PDR_KBSR .FILL xFE00
+PDR_KBDR .FILL xFE02
+PDR_PSTR .FILL PRINT_STR
+
+STR_DRAW
+    .STRINGZ "\n  +---------------------------------------------------------+\n  |                                                         |\n  |      * * * * *    D R A W !    * * * * *               |\n  |                                                         |\n  +---------------------------------------------------------+\n\n"
+
+; =============================================================================
+; SUBROUTINE: REACTION_LOOP
+;   Animates the outlaw drawing his gun frame by frame.
+;   Between each frame it calls KB_POLL via JSRR to check for a keypress.
+;   If the player presses any key before the last frame: PLAYER_ALIVE = 1
+;   If all frames expire with no keypress:              PLAYER_ALIVE = 0
+;
+;   Sets: PLAYER_ALIVE (1 = survived, 0 = dead)
+;         PLAYER_FRAME (frame 0-2 when key was pressed; only valid if alive)
+;
+;   Animation frames (3 survive + 1 death):
+;     Frame 0:  ( o ) |_|   hand twitches...
+;     Frame 1:  ( o ) |_/   reaching for iron...
+;     Frame 2:  ( o ) [=/   DRAWING!!!
+;     Death:    ( o ) [==>  *BANG!*
+;
+;   Uses R3 as frame counter. R5 as JSRR scratch (not saved by convention).
+; =============================================================================
+REACTION_LOOP
+    ST   R7, RL_R7
+    ST   R0, RL_R0
+    ST   R1, RL_R1
+    ST   R2, RL_R2
+    ST   R3, RL_R3
+
+    AND  R3, R3, #0             ; R3 = frame counter = 0
+
+RL_FRAME
+    LD   R5, RL_KBPOLL          ; non-blocking keyboard check
+    JSRR R5                     ; KB_POLL -> R0 = char or 0
+    ADD  R0, R0, #0             ; set condition codes on R0
+    BRnp RL_PRESSED             ; nonzero char = key pressed
+
+    ; No key yet.  Check if we have exhausted all frames.
+    LD   R1, RL_MAX_FRAMES
+    NOT  R1, R1
+    ADD  R1, R1, #1             ; R1 = -MAX_FRAMES
+    ADD  R1, R3, R1             ; R1 = frame - MAX_FRAMES
+    BRz  RL_DEAD                ; reached limit -> dead
+
+    ; Print the animation frame for R3
+    LEA  R1, RL_FTABLE          ; base of frame address table
+    ADD  R1, R1, R3             ; R1 = &table[frame]
+    LDR  R0, R1, #0             ; R0 = address of frame string
+    LD   R5, RL_PSTR
+    JSRR R5
+
+    ; Busy-wait delay between frames (gives player time to react)
+    LD   R1, RL_OUTER
+RL_OLOOP
+    LD   R2, RL_INNER
+RL_ILOOP
+    ADD  R2, R2, #-1
+    BRnp RL_ILOOP
+    ADD  R1, R1, #-1
+    BRnp RL_OLOOP
+
+    ADD  R3, R3, #1             ; advance frame
+    BR   RL_FRAME
+
+RL_PRESSED
+    ; Player hit a key in time!
+    AND  R0, R0, #0
+    ADD  R0, R0, #1
+    ST   R0, PLAYER_ALIVE       ; alive = 1
+    ST   R3, PLAYER_FRAME       ; save frame number for scoring
+    BR   RL_DONE
+
+RL_DEAD
+    ; Print death animation frame
+    LEA  R0, STR_OUTLAW_DEAD
+    LD   R5, RL_PSTR
+    JSRR R5
+    AND  R0, R0, #0
+    ST   R0, PLAYER_ALIVE       ; alive = 0
+
+RL_DONE
+    LD   R0, RL_R0
+    LD   R1, RL_R1
+    LD   R2, RL_R2
+    LD   R3, RL_R3
+    LD   R7, RL_R7
+    RET
+
+RL_R7          .BLKW 1
+RL_R0          .BLKW 1
+RL_R1          .BLKW 1
+RL_R2          .BLKW 1
+RL_R3          .BLKW 1
+RL_PSTR        .FILL PRINT_STR
+RL_KBPOLL      .FILL KB_POLL
+RL_MAX_FRAMES  .FILL #3         ; frames 0,1,2 = survive window; hitting 3 = dead
+RL_OUTER       .FILL #150       ; tune these two to adjust frame speed
+RL_INNER       .FILL #200
+
+; Frame address table (indexed by frame number 0-2)
+RL_FTABLE
+    .FILL STR_FRAME0
+    .FILL STR_FRAME1
+    .FILL STR_FRAME2
+
+; Shared outcome flags (read by PRINT_SCORE)
+PLAYER_ALIVE .BLKW 1
+PLAYER_FRAME .BLKW 1
+
+STR_FRAME0
+    .STRINGZ "  ( o ) |_|   ...hand twitches...\n"
+STR_FRAME1
+    .STRINGZ "  ( o ) |_/   ...reaching for iron...\n"
+STR_FRAME2
+    .STRINGZ "  ( o ) [=/   THE OUTLAW DRAWS!\n"
+STR_OUTLAW_DEAD
+    .STRINGZ "  ( o ) [==>  *BANG!*  The outlaw fires first!\n\n"
+
+; =============================================================================
+; SUBROUTINE: PRINT_SCORE
+;   Reads PLAYER_ALIVE and PLAYER_FRAME, prints the outcome.
+;   Alive scoring (by frame pressed):
+;     Frame 0 -> LIGHTNING FAST  (reacted before outlaw even moved)
+;     Frame 1 -> Quick Draw      (reacted as outlaw reached)
+;     Frame 2 -> Just in time    (reacted as outlaw drew)
+;   Dead -> epitaph message
+; =============================================================================
+PRINT_SCORE
+    ST   R7, PSC_R7
+    ST   R0, PSC_R0
+    ST   R1, PSC_R1
+
+    LD   R1, PLAYER_ALIVE
+    BRz  PSC_DEAD               ; alive = 0 -> dead path
+
+    ; --- ALIVE ---
+    LEA  R0, STR_BANG
+    LD   R5, PSC_PSTR
+    JSRR R5
+
+    LD   R1, PLAYER_FRAME
+
+    BRz  PSC_FAST               ; frame 0
+
+    ADD  R1, R1, #-1
+    BRz  PSC_MEDIUM             ; frame 1
+
+    ; frame 2 (just in time)
+    LEA  R0, STR_CLOSE
+    LD   R5, PSC_PSTR
+    JSRR R5
+    BR   PSC_DONE
+
+PSC_FAST
+    LEA  R0, STR_FAST
+    LD   R5, PSC_PSTR
+    JSRR R5
+    BR   PSC_DONE
+
+PSC_MEDIUM
+    LEA  R0, STR_MEDIUM
+    LD   R5, PSC_PSTR
+    JSRR R5
+    BR   PSC_DONE
+
+    ; --- DEAD ---
+PSC_DEAD
+    LEA  R0, STR_EPITAPH
+    LD   R5, PSC_PSTR
+    JSRR R5
+
+PSC_DONE
+    LD   R0, PSC_R0
+    LD   R1, PSC_R1
+    LD   R7, PSC_R7
+    RET
+
+PSC_R7   .BLKW 1
+PSC_R0   .BLKW 1
+PSC_R1   .BLKW 1
+PSC_PSTR .FILL PRINT_STR
+
+STR_BANG
+    .STRINGZ "\n  [BANG!]\n\n  "
+STR_FAST
+    .STRINGZ "LIGHTNING FAST! You drew before the outlaw blinked!\n\n"
+STR_MEDIUM
+    .STRINGZ "Quick Draw! You got 'em!\n\n"
+STR_CLOSE
+    .STRINGZ "Just in time... that was way too close, partner.\n\n"
+STR_EPITAPH
+    .STRINGZ "  ...They'll be buryin' you at sundown, cowboy.\n\n"
+
+; =============================================================================
+; SUBROUTINE: ASK_PLAY_AGAIN
+;   Prompts y/n, returns R0 = 1 for y/Y, R0 = 0 otherwise.
+; =============================================================================
+ASK_PLAY_AGAIN
+    ST   R7, AP_R7
+    ST   R1, AP_R1
+
+    LEA  R0, STR_AGAIN
+    LD   R5, AP_PSTR
+    JSRR R5
+
+AP_WAIT
+    LDI  R1, AP_KBSR
+    BRzp AP_WAIT
+    LDI  R0, AP_KBDR            ; R0 = key pressed
+    ST   R0, AP_KEY
+    OUT                         ; echo character
+    AND  R0, R0, #0
+    ADD  R0, R0, #10            ; newline (ASCII 10)
+    OUT
+
+    LD   R0, AP_KEY
+
+    LD   R1, AP_Y_LOW
+    NOT  R1, R1
+    ADD  R1, R1, #1
+    ADD  R1, R0, R1
+    BRz  AP_YES
+
+    LD   R1, AP_Y_UP
+    NOT  R1, R1
+    ADD  R1, R1, #1
+    ADD  R1, R0, R1
+    BRz  AP_YES
+
+    AND  R0, R0, #0             ; return 0 (no)
+    BR   AP_DONE
+
+AP_YES
+    AND  R0, R0, #0
+    ADD  R0, R0, #1             ; return 1 (yes)
+
+AP_DONE
+    LD   R1, AP_R1
+    LD   R7, AP_R7
+    RET
+
+AP_R7    .BLKW 1
+AP_R1    .BLKW 1
+AP_KEY   .BLKW 1
+AP_KBSR  .FILL xFE00
+AP_KBDR  .FILL xFE02
+AP_Y_LOW .FILL x79              ; 'y'
+AP_Y_UP  .FILL x59              ; 'Y'
+AP_PSTR  .FILL PRINT_STR
+
+STR_AGAIN .STRINGZ "\n  Play again? (y/n): "
+
+; =============================================================================
+; SUBROUTINE: RANDOM_DELAY
+;   Variable-length wait before DRAW! using a shift-register seed.
+; =============================================================================
+RANDOM_DELAY
+    ST   R7, RD_R7
+    ST   R0, RD_R0
+    ST   R1, RD_R1
+    ST   R2, RD_R2
+
+    LD   R0, RD_SEED
+    ADD  R0, R0, R0             ; shift left
+    ADD  R0, R0, #1             ; keep nonzero
+    ST   R0, RD_SEED
+
+    LD   R1, RD_MASK
+    AND  R0, R0, R1             ; low byte as outer count
+    LD   R1, RD_MIN
+    ADD  R0, R0, R1             ; R0 = MIN + (seed & 0xFF)
+
+RD_OUTER
+    ADD  R0, R0, #-1
+    BRz  RD_DONE
+    LD   R2, RD_INNER
+RD_ILOOP
+    ADD  R2, R2, #-1
+    BRnp RD_ILOOP
+    BR   RD_OUTER
+
+RD_DONE
+    LD   R0, RD_R0
+    LD   R1, RD_R1
+    LD   R2, RD_R2
+    LD   R7, RD_R7
+    RET
+
+RD_R7    .BLKW 1
+RD_R0    .BLKW 1
+RD_R1    .BLKW 1
+RD_R2    .BLKW 1
+RD_SEED  .FILL xACE1
+RD_MASK  .FILL x00FF
+RD_MIN   .FILL #64
+RD_INNER .FILL #400
+
+; =============================================================================
+; SUBROUTINE: PRINT_GOODBYE
+; =============================================================================
+PRINT_GOODBYE
+    ST   R7, PG_R7
+    ST   R0, PG_R0
+
+    LEA  R0, STR_BYE
+    LD   R5, PG_PSTR
+    JSRR R5
+
+    LD   R0, PG_R0
+    LD   R7, PG_R7
+    RET
+
+PG_R7   .BLKW 1
+PG_R0   .BLKW 1
+PG_PSTR .FILL PRINT_STR
+
+STR_BYE
+    .STRINGZ "\n  You holster your iron and ride off into the sunset.\n  Ride on, cowboy.\n\n============================================================\n\n"
+
+; =============================================================================
+; SUBROUTINE: PRINT_STR
+;   Prints null-terminated string whose address is in R0.
+;   Clobbers R0 and R1.  Called via JSRR (no range limit needed).
+; =============================================================================
+PRINT_STR
+    ST   R7, PS_R7
+PS_LOOP
+    LDR  R1, R0, #0             ; load char from [R0]
+    BRz  PS_DONE                ; null terminator -> done
+    ST   R0, PS_PTR
+    ADD  R0, R1, #0             ; move char to R0
+    OUT
+    LD   R0, PS_PTR
+    ADD  R0, R0, #1
+    BR   PS_LOOP
+PS_DONE
+    LD   R7, PS_R7
+    RET
+
+PS_R7  .BLKW 1
+PS_PTR .BLKW 1
+
+.END
