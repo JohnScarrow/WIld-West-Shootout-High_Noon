@@ -428,48 +428,111 @@ STR_AGAIN .STRINGZ "\n  Play again? (y/n): "
 
 ; =============================================================================
 ; SUBROUTINE: RANDOM_DELAY
-;   Variable-length wait before DRAW! using a shift-register seed.
+;   Variable-length suspense wait before DRAW!  Instead of just busy-waiting,
+;   prints 3-6 random "suspense" lines (rolling tumbleweeds, pounding heart,
+;   sweat, etc.) with a busy-wait between each one. Some lines are designed
+;   to tempt the player into reacting early -- early presses are flushed
+;   by PRINT_DRAW, so jumpy players just waste their reaction.
+;
+;   Uses RD_SEED as a pseudo-random source for:
+;     - line count (3 to 6 lines per round)
+;     - starting offset into the suspense table (0 to 7)
+;
+;   R3 = current line index into table (0-7, wraps)
+;   R4 = remaining lines to show (countdown)
 ; =============================================================================
 RANDOM_DELAY
     ST   R7, RD_R7
     ST   R0, RD_R0
     ST   R1, RD_R1
     ST   R2, RD_R2
+    ST   R3, RD_R3
+    ST   R4, RD_R4
 
+    ; --- update seed (shift-register) ---
     LD   R0, RD_SEED
     ADD  R0, R0, R0             ; shift left
     ADD  R0, R0, #1             ; keep nonzero
     ST   R0, RD_SEED
 
-    LD   R1, RD_MASK
-    AND  R0, R0, R1             ; low byte as outer count
-    LD   R1, RD_MIN
-    ADD  R0, R0, R1             ; R0 = MIN + (seed & 0xFF)
+    ; --- pick number of lines to show: 3 + (seed & 3)  =  3 to 6 lines ---
+    LD   R1, RD_MASK_LINES      ; #3
+    AND  R4, R0, R1             ; R4 = seed & 3   (0..3)
+    ADD  R4, R4, #3             ; R4 = 3..6
 
-RD_OUTER
+    ; --- pick starting offset into suspense table: seed & 7 ---
+    LD   R1, RD_MASK_TABLE      ; #7
+    AND  R3, R0, R1             ; R3 = 0..7
+
+RD_LINE_LOOP
+    ; print suspense line at RD_TABLE[R3]
+    LEA  R1, RD_TABLE
+    ADD  R1, R1, R3
+    LDR  R0, R1, #0             ; R0 = address of string
+    LD   R5, RD_PSTR
+    JSRR R5
+
+    ; sub-delay between lines
+    LD   R0, RD_SUB_OUTER
+RD_SUB_OL
     ADD  R0, R0, #-1
-    BRz  RD_DONE
-    LD   R2, RD_INNER
-RD_ILOOP
+    BRz  RD_SUB_DONE
+    LD   R2, RD_SUB_INNER
+RD_SUB_IL
     ADD  R2, R2, #-1
-    BRnp RD_ILOOP
-    BR   RD_OUTER
+    BRnp RD_SUB_IL
+    BR   RD_SUB_OL
+RD_SUB_DONE
 
-RD_DONE
+    ; advance line index, wrap at 8
+    ADD  R3, R3, #1
+    LD   R1, RD_MASK_TABLE      ; #7
+    AND  R3, R3, R1             ; R3 = (R3 + 1) & 7
+
+    ; decrement line counter
+    ADD  R4, R4, #-1
+    BRp  RD_LINE_LOOP
+
     LD   R0, RD_R0
     LD   R1, RD_R1
     LD   R2, RD_R2
+    LD   R3, RD_R3
+    LD   R4, RD_R4
     LD   R7, RD_R7
     RET
 
-RD_R7    .BLKW 1
-RD_R0    .BLKW 1
-RD_R1    .BLKW 1
-RD_R2    .BLKW 1
-RD_SEED  .FILL xACE1
-RD_MASK  .FILL x00FF
-RD_MIN   .FILL #64
-RD_INNER .FILL #400
+RD_R7         .BLKW 1
+RD_R0         .BLKW 1
+RD_R1         .BLKW 1
+RD_R2         .BLKW 1
+RD_R3         .BLKW 1
+RD_R4         .BLKW 1
+RD_SEED       .FILL xACE1
+RD_PSTR       .FILL PRINT_STR
+RD_MASK_LINES .FILL #3          ; mask for "0..3 -> 3..6 lines"
+RD_MASK_TABLE .FILL #7          ; mask for "0..7 table index"
+RD_SUB_OUTER  .FILL #80         ; per-line outer-loop count
+RD_SUB_INNER  .FILL #1500       ; per-line inner-loop iterations
+
+; suspense line address table (8 entries, indexed 0-7)
+RD_TABLE
+    .FILL STR_SUS_0
+    .FILL STR_SUS_1
+    .FILL STR_SUS_2
+    .FILL STR_SUS_3
+    .FILL STR_SUS_4
+    .FILL STR_SUS_5
+    .FILL STR_SUS_6
+    .FILL STR_SUS_7
+
+STR_SUS_0  .STRINGZ "  *  tumbleweed rolls past...  *\n"
+STR_SUS_1  .STRINGZ "  the wind howls down the canyon...\n"
+STR_SUS_2  .STRINGZ "  your heart pounds in your ears...\n"
+STR_SUS_3  .STRINGZ "  the outlaw's eyes narrow...\n"
+STR_SUS_4  .STRINGZ "  sweat drips from your hatband...\n"
+STR_SUS_5  .STRINGZ "  a hawk circles overhead...\n"
+STR_SUS_6  .STRINGZ "  the saloon doors creak shut...\n"
+STR_SUS_7  .STRINGZ "  was that... a twitch??\n"
 
 ; =============================================================================
 ; SUBROUTINE: PRINT_GOODBYE
