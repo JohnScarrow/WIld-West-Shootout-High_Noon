@@ -35,8 +35,10 @@ GAME_LOOP
     LD   R5, ADDR_PREADY
     JSRR R5
 
-    LD   R5, ADDR_RDELAY        ; random wait before DRAW!
+    LD   R5, ADDR_RDELAY        ; suspense delay; R0 = 1 if player drew early
     JSRR R5
+    ADD  R0, R0, #0             ; set condition codes (JSRR doesn't)
+    BRp  SKIP_ACTION            ; cheater -> skip DRAW! and reaction loop
 
     LD   R5, ADDR_PDRAW         ; flush buffer, print DRAW! banner
     JSRR R5
@@ -44,11 +46,13 @@ GAME_LOOP
     LD   R5, ADDR_RLOOP         ; animated reaction loop (sets PLAYER_ALIVE)
     JSRR R5
 
-    LD   R5, ADDR_PSCORE        ; print outcome
+SKIP_ACTION
+    LD   R5, ADDR_PSCORE        ; print outcome (checks CHEATER first)
     JSRR R5
 
     LD   R5, ADDR_AGAIN         ; play again? -> R0 = 1 or 0
     JSRR R5
+    ADD  R0, R0, #0             ; set condition codes on R0 (JSRR doesn't)
     BRp  GAME_LOOP
 
     LD   R5, ADDR_PBYE
@@ -270,7 +274,7 @@ RL_R3          .BLKW 1
 RL_PSTR        .FILL PRINT_STR
 RL_KBPOLL      .FILL KB_POLL
 RL_MAX_FRAMES  .FILL #3         ; frames 0,1,2 = survive window; hitting 3 = dead
-RL_OUTER       .FILL #150       ; tune these two to adjust frame speed
+RL_OUTER       .FILL #60        ; tune these two to adjust frame speed (was 150)
 RL_INNER       .FILL #200
 
 ; Frame address table (indexed by frame number 0-2)
@@ -282,6 +286,7 @@ RL_FTABLE
 ; Shared outcome flags (read by PRINT_SCORE)
 PLAYER_ALIVE .BLKW 1
 PLAYER_FRAME .BLKW 1
+CHEATER      .BLKW 1            ; 1 = player drew before DRAW! (set by RANDOM_DELAY)
 
 STR_FRAME0
     .STRINGZ "  ( o ) |_|   ...hand twitches...\n"
@@ -305,6 +310,9 @@ PRINT_SCORE
     ST   R7, PSC_R7
     ST   R0, PSC_R0
     ST   R1, PSC_R1
+
+    LD   R1, CHEATER            ; check cheat flag first
+    BRp  PSC_CHEATED
 
     LD   R1, PLAYER_ALIVE
     BRz  PSC_DEAD               ; alive = 0 -> dead path
@@ -344,6 +352,13 @@ PSC_DEAD
     LEA  R0, STR_EPITAPH
     LD   R5, PSC_PSTR
     JSRR R5
+    BR   PSC_DONE
+
+    ; --- CHEATED (drew too early) ---
+PSC_CHEATED
+    LEA  R0, STR_CHEAT_SCORE
+    LD   R5, PSC_PSTR
+    JSRR R5
 
 PSC_DONE
     LD   R0, PSC_R0
@@ -366,6 +381,8 @@ STR_CLOSE
     .STRINGZ "Just in time... that was way too close, partner.\n\n"
 STR_EPITAPH
     .STRINGZ "  ...They'll be buryin' you at sundown, cowboy.\n\n"
+STR_CHEAT_SCORE
+    .STRINGZ "\n  [CLICK... BANG!]\n\n  You shot your own boot, cowboy.\n  No outlaw needed -- you done it to yourself.\n\n"
 
 ; =============================================================================
 ; SUBROUTINE: ASK_PLAY_AGAIN
@@ -428,26 +445,37 @@ STR_AGAIN .STRINGZ "\n  Play again? (y/n): "
 
 ; =============================================================================
 ; SUBROUTINE: RANDOM_DELAY
-;   Variable-length suspense wait before DRAW!  Instead of just busy-waiting,
-;   prints 3-6 random "suspense" lines (rolling tumbleweeds, pounding heart,
-;   sweat, etc.) with a busy-wait between each one. Some lines are designed
-;   to tempt the player into reacting early -- early presses are flushed
-;   by PRINT_DRAW, so jumpy players just waste their reaction.
+;   Variable-length suspense wait before DRAW!  Prints 3-6 random "suspense"
+;   lines (rolling tumbleweeds, pounding heart, sweat, etc.) with a busy-wait
+;   between each one. Some lines are deliberately worded to tempt the player
+;   into reacting early.
 ;
-;   Uses RD_SEED as a pseudo-random source for:
-;     - line count (3 to 6 lines per round)
-;     - starting offset into the suspense table (0 to 7)
+;   EARLY-PRESS DETECTION:
+;     After each sub-delay, KB_POLL is called.  If a key was pressed:
+;       - Print a "you twitched!" notice
+;       - Set CHEATER = 1 (read later by PRINT_SCORE)
+;       - Exit early
+;     If no key was pressed during the entire delay, CHEATER stays 0.
 ;
-;   R3 = current line index into table (0-7, wraps)
-;   R4 = remaining lines to show (countdown)
+;   RETURNS: R0 = 1 if player drew early, R0 = 0 otherwise.
+;            (R0 is NOT saved/restored -- it carries the return value.)
+;
+;   Uses RD_SEED for pseudo-random line count (3-6) and table offset (0-7).
 ; =============================================================================
 RANDOM_DELAY
     ST   R7, RD_R7
-    ST   R0, RD_R0
     ST   R1, RD_R1
     ST   R2, RD_R2
     ST   R3, RD_R3
     ST   R4, RD_R4
+
+    ; --- clear cheat flag for this round ---
+    AND  R0, R0, #0
+    STI  R0, RD_CHEATER_PTR     ; CHEATER = 0
+
+    ; --- flush any stale keypress left over from previous prompt ---
+    LD   R5, RD_KBPOLL
+    JSRR R5                     ; discard return value
 
     ; --- update seed (shift-register) ---
     LD   R0, RD_SEED
@@ -484,16 +512,38 @@ RD_SUB_IL
     BR   RD_SUB_OL
 RD_SUB_DONE
 
+    ; --- CHECK FOR EARLY KEYPRESS ---
+    LD   R5, RD_KBPOLL
+    JSRR R5                     ; R0 = char if pressed, 0 otherwise
+    ADD  R0, R0, #0             ; set condition codes on R0
+    BRnp RD_CHEATED             ; nonzero -> player drew early!
+
     ; advance line index, wrap at 8
     ADD  R3, R3, #1
     LD   R1, RD_MASK_TABLE      ; #7
-    AND  R3, R3, R1             ; R3 = (R3 + 1) & 7
+    AND  R3, R3, R1
 
-    ; decrement line counter
+    ; decrement line counter, loop if more lines remaining
     ADD  R4, R4, #-1
     BRp  RD_LINE_LOOP
 
-    LD   R0, RD_R0
+    ; --- normal exit: no early press ---
+    AND  R0, R0, #0             ; return R0 = 0
+    BR   RD_DONE
+
+RD_CHEATED
+    ; Print "you twitched" notice mid-suspense
+    LEA  R0, STR_TWITCH
+    LD   R5, RD_PSTR
+    JSRR R5
+
+    ; Set CHEATER = 1 for PRINT_SCORE to read
+    AND  R0, R0, #0
+    ADD  R0, R0, #1
+    STI  R0, RD_CHEATER_PTR
+    ; R0 still = 1, becomes the return value
+
+RD_DONE
     LD   R1, RD_R1
     LD   R2, RD_R2
     LD   R3, RD_R3
@@ -501,18 +551,21 @@ RD_SUB_DONE
     LD   R7, RD_R7
     RET
 
-RD_R7         .BLKW 1
-RD_R0         .BLKW 1
-RD_R1         .BLKW 1
-RD_R2         .BLKW 1
-RD_R3         .BLKW 1
-RD_R4         .BLKW 1
-RD_SEED       .FILL xACE1
-RD_PSTR       .FILL PRINT_STR
-RD_MASK_LINES .FILL #3          ; mask for "0..3 -> 3..6 lines"
-RD_MASK_TABLE .FILL #7          ; mask for "0..7 table index"
-RD_SUB_OUTER  .FILL #80         ; per-line outer-loop count
-RD_SUB_INNER  .FILL #1500       ; per-line inner-loop iterations
+RD_R7          .BLKW 1
+RD_R1          .BLKW 1
+RD_R2          .BLKW 1
+RD_R3          .BLKW 1
+RD_R4          .BLKW 1
+RD_SEED        .FILL xACE1
+RD_PSTR        .FILL PRINT_STR
+RD_KBPOLL      .FILL KB_POLL
+RD_CHEATER_PTR .FILL CHEATER
+RD_MASK_LINES  .FILL #3         ; mask for "0..3 -> 3..6 lines"
+RD_MASK_TABLE  .FILL #7         ; mask for "0..7 table index"
+RD_SUB_OUTER   .FILL #80        ; per-line outer-loop count
+RD_SUB_INNER   .FILL #1500      ; per-line inner-loop iterations
+
+STR_TWITCH .STRINGZ "\n  *** Whoa partner -- you drew TOO EARLY! ***\n"
 
 ; suspense line address table (8 entries, indexed 0-7)
 RD_TABLE
